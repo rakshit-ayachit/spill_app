@@ -9,6 +9,7 @@ interface BillItem {
   id: string;
   description: string;
   price: number;
+  isShared?: boolean; // Flag for tax items that will be shared equally
 }
 
 /**
@@ -99,31 +100,31 @@ export const processBillImage = async (
     const prompt = `
       This is an image of a bill or receipt from a restaurant, store, or service provider.
       
-      Please carefully analyze the image and extract the individual line items along with their prices.
+      Please carefully analyze the image and extract:
+      1. All individual line items with their prices
+      2. Any tax-related items (sales tax, GST, HST, VAT, service charge, etc.)
+      
       Pay special attention to:
       - Item names/descriptions
       - Their corresponding prices
-      - Ignore tax, tip, or total sections except for CGST and SGST.
+      - All tax-related charges
       
-      Also extract the CGST and SGST amounts separately.
+      Format your response as a valid JSON array of objects with the following structure:
+      [
+        {
+          "description": "Item name",
+          "price": 10.99,
+          "isTax": false
+        },
+        {
+          "description": "Tax",
+          "price": 1.50,
+          "isTax": true
+        }
+      ]
       
-      For each item, provide:
-      1. The item description (exactly as written)
-      2. The price (as a number, without currency symbols)
-      
-      Provide CGST and SGST as separate fields (numbers).
-      
-      Format your response as a JSON object with the following structure:
-      {
-        "items": [
-          {
-            "description": "Item name",
-            "price": 10.99
-          }
-        ],
-        "cgst": 1.00,
-        "sgst": 1.00
-      }
+      For regular items, set "isTax" to false.
+      For any tax or service charge items, set "isTax" to true.
       
       Only include the JSON object in your response, nothing else. Make sure the JSON is valid and properly formatted.
       If you can't see any items or taxes clearly, return empty array for items and zero for cgst and sgst, e.g.:
@@ -138,9 +139,9 @@ export const processBillImage = async (
     const result = await model.generateContent([prompt, imagePart]);
     const response = await result.response;
     const text = response.text();
-
-    // Parse JSON response
-    let parsedResponse: { items: { description: string; price: number }[]; cgst: number; sgst: number };
+    
+    // Parse the JSON response
+    let parsedItems: { description: string; price: number; isTax?: boolean }[];
     try {
       parsedResponse = JSON.parse(text);
     } catch (e) {
@@ -164,7 +165,8 @@ export const processBillImage = async (
     const billItems: BillItem[] = items.map((item, index) => ({
       id: (index + 1).toString(),
       description: item.description,
-      price: +(item.price + totalTaxPerItem).toFixed(2), // round to 2 decimals
+      price: item.price,
+      isShared: item.isTax === true // Mark tax items as shared
     }));
 
     return { items: billItems };
