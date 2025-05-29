@@ -48,7 +48,8 @@ const getMimeTypeFromUri = (uri: string): string => {
 
 /**
  * Processes a bill image using Google's Generative AI (Gemini)
- * and extracts items with their prices
+ * and extracts items with their prices, including CGST and SGST,
+ * splitting tax equally across items.
  */
 export const processBillImage = async (
   imageUri: string
@@ -58,10 +59,11 @@ export const processBillImage = async (
     if (!CONFIG.GEMINI_API_KEY || CONFIG.GEMINI_API_KEY === 'YOUR_GEMINI_API_KEY') {
       throw new Error('Gemini API key not configured. Please add your API key in the config file.');
     }
+
     // Get the base64 data and MIME type
     const base64Data = await getBase64FromUri(imageUri);
     const mimeType = getMimeTypeFromUri(imageUri);
-    
+
     // Configure the Gemini model
     const model = genAI.getGenerativeModel({
       model: "gemini-2.0-flash",
@@ -101,49 +103,68 @@ export const processBillImage = async (
       Pay special attention to:
       - Item names/descriptions
       - Their corresponding prices
-      - Ignore tax, tip, or total sections
+      - Ignore tax, tip, or total sections except for CGST and SGST.
+      
+      Also extract the CGST and SGST amounts separately.
       
       For each item, provide:
       1. The item description (exactly as written)
       2. The price (as a number, without currency symbols)
       
-      Format your response as a valid JSON array of objects with the following structure:
-      [
-        {
-          "description": "Item name",
-          "price": 10.99
-        }
-      ]
+      Provide CGST and SGST as separate fields (numbers).
       
-      Only include the JSON array in your response, nothing else. Make sure the JSON is valid and properly formatted.
-      If you can't see any items clearly, return an empty array [].
+      Format your response as a JSON object with the following structure:
+      {
+        "items": [
+          {
+            "description": "Item name",
+            "price": 10.99
+          }
+        ],
+        "cgst": 1.00,
+        "sgst": 1.00
+      }
+      
+      Only include the JSON object in your response, nothing else. Make sure the JSON is valid and properly formatted.
+      If you can't see any items or taxes clearly, return empty array for items and zero for cgst and sgst, e.g.:
+      {
+        "items": [],
+        "cgst": 0,
+        "sgst": 0
+      }
     `;
 
-    // Generate content
+    // Generate content from model
     const result = await model.generateContent([prompt, imagePart]);
     const response = await result.response;
     const text = response.text();
-    
-    // Parse the JSON response
-    let parsedItems: { description: string; price: number }[];
+
+    // Parse JSON response
+    let parsedResponse: { items: { description: string; price: number }[]; cgst: number; sgst: number };
     try {
-      // Try to parse the direct response
-      parsedItems = JSON.parse(text);
+      parsedResponse = JSON.parse(text);
     } catch (e) {
-      // If direct parsing fails, try to extract JSON from the text
-      const jsonMatch = text.match(/\[[\s\S]*\]/);
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
-        parsedItems = JSON.parse(jsonMatch[0]);
+        parsedResponse = JSON.parse(jsonMatch[0]);
       } else {
         throw new Error('Failed to parse model response as JSON');
       }
     }
-    
-    // Map the parsed items to our BillItem interface with unique IDs
-    const billItems: BillItem[] = parsedItems.map((item, index) => ({
+
+    // Defensive defaults if missing
+    const items = parsedResponse.items || [];
+    const cgst = parsedResponse.cgst || 0;
+    const sgst = parsedResponse.sgst || 0;
+
+    // Split total tax equally across items
+    const totalTaxPerItem = items.length > 0 ? (cgst + sgst) / items.length : 0;
+
+    // Map to BillItem with unique IDs and adjusted prices
+    const billItems: BillItem[] = items.map((item, index) => ({
       id: (index + 1).toString(),
       description: item.description,
-      price: item.price,
+      price: +(item.price + totalTaxPerItem).toFixed(2), // round to 2 decimals
     }));
 
     return { items: billItems };
