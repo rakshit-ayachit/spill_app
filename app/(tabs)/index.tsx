@@ -21,6 +21,7 @@ interface BillItem {
   id: string;
   description: string;
   price: number;
+  isShared?: boolean; // Items like taxes that are shared equally
 }
 
 interface Participant {
@@ -110,12 +111,27 @@ export default function SplitShareApp() {
     }
   };
 
+  // When adding a participant, auto-assign them to shared items
   const handleAddParticipant = () => {
     if (newParticipantName.trim() && !participants.find(p => p.name === newParticipantName.trim())) {
-      setParticipants([...participants, { 
+      const newParticipant = { 
         id: Date.now().toString(), 
         name: newParticipantName.trim() 
-      }]);
+      };
+      
+      setParticipants([...participants, newParticipant]);
+      
+      // Auto-assign to shared items
+      if (extractedItems.length > 0) {
+        const newAssignments = { ...itemAssignments };
+        extractedItems.forEach(item => {
+          if (item.isShared && newAssignments[item.id]) {
+            newAssignments[item.id] = [...newAssignments[item.id], newParticipant.id];
+          }
+        });
+        setItemAssignments(newAssignments);
+      }
+      
       setNewParticipantName('');
     } else if (participants.find(p => p.name === newParticipantName.trim())) {
       Alert.alert('Participant exists', 'This participant name is already added.');
@@ -154,10 +170,17 @@ export default function SplitShareApp() {
         
         // Initialize assignments
         const initialAssignments: ItemAssignments = {};
-        itemsWithIds.forEach(item => initialAssignments[item.id] = []);
+        itemsWithIds.forEach(item => {
+          // For shared items like taxes, automatically assign to all participants
+          if (item.isShared) {
+            initialAssignments[item.id] = participants.map(p => p.id);
+          } else {
+            initialAssignments[item.id] = [];
+          }
+        });
         setItemAssignments(initialAssignments);
         setAppStep('assign_items');
-        Alert.alert('Success', 'Bill items extracted successfully.');
+        Alert.alert('Success', 'Bill items extracted successfully. Taxes and service charges will be split equally.');
       } else {
         throw new Error('Failed to extract items or no items found.');
       }
@@ -208,24 +231,42 @@ export default function SplitShareApp() {
     const costs: CostPerParticipant = {};
     participants.forEach(p => costs[p.id] = 0);
 
-    const assignedItemIds = new Set<string>();
-
-    extractedItems.forEach(item => {
-      const assignedTo = itemAssignments[item.id] || [];
-      if (assignedTo.length > 0) {
-        assignedItemIds.add(item.id);
-        const costPerParticipant = item.price / assignedTo.length;
-        assignedTo.forEach(pId => {
-          costs[pId] = (costs[pId] || 0) + costPerParticipant;
-        });
-      }
-    });
+    // Process normal items that have specific assignments
+    extractedItems
+      .filter(item => !item.isShared)
+      .forEach(item => {
+        const assignedTo = itemAssignments[item.id] || [];
+        if (assignedTo.length > 0) {
+          const costPerParticipant = item.price / assignedTo.length;
+          assignedTo.forEach(pId => {
+            costs[pId] = (costs[pId] || 0) + costPerParticipant;
+          });
+        }
+      });
     
-    const unassignedItems = extractedItems.filter(item => !assignedItemIds.has(item.id));
-    if (unassignedItems.length > 0 && participants.length > 0) {
-      const costPerSharedItemPortion = unassignedItems.reduce((sum, item) => sum + item.price, 0) / participants.length;
+    // Process shared items (like taxes) - always split equally
+    const sharedItems = extractedItems.filter(item => item.isShared);
+    if (sharedItems.length > 0 && participants.length > 0) {
+      const totalSharedCost = sharedItems.reduce((sum, item) => sum + item.price, 0);
+      const costPerParticipant = totalSharedCost / participants.length;
+      
       participants.forEach(p => {
-        costs[p.id] = (costs[p.id] || 0) + costPerSharedItemPortion;
+        costs[p.id] = (costs[p.id] || 0) + costPerParticipant;
+      });
+    }
+    
+    // Handle unassigned non-shared items (split equally among all)
+    const unassignedItems = extractedItems.filter(item => 
+      !item.isShared && 
+      (!itemAssignments[item.id] || itemAssignments[item.id].length === 0)
+    );
+    
+    if (unassignedItems.length > 0 && participants.length > 0) {
+      const totalUnassignedCost = unassignedItems.reduce((sum, item) => sum + item.price, 0);
+      const costPerParticipant = totalUnassignedCost / participants.length;
+      
+      participants.forEach(p => {
+        costs[p.id] = (costs[p.id] || 0) + costPerParticipant;
       });
     }
     
@@ -302,25 +343,36 @@ export default function SplitShareApp() {
   const renderAssignItemsStep = () => (
     <ScrollView style={styles.stepContainer}>
       {extractedItems.map(item => (
-        <View key={item.id} style={styles.itemCard}>
+        <View key={item.id} style={[styles.itemCard, item.isShared && styles.sharedItemCard]}>
           <View style={styles.itemHeader}>
-            <Text style={styles.itemDescription}>{item.description}</Text>
+            <Text style={styles.itemDescription}>
+              {item.description}
+              {item.isShared && <Text style={styles.sharedLabel}> (Shared equally)</Text>}
+            </Text>
             <Text style={styles.itemPrice}>₹{item.price.toFixed(2)}</Text>
           </View>
-          <Text style={styles.sharedByLabel}>Shared by:</Text>
+          <Text style={styles.sharedByLabel}>
+            {item.isShared ? 'Shared by everyone:' : 'Shared by:'}
+          </Text>
           <View style={styles.participantGrid}>
             {participants.map(p => (
               <TouchableOpacity
                 key={p.id}
                 style={[
                   styles.participantCheckbox,
-                  itemAssignments[item.id]?.includes(p.id) && styles.participantCheckboxSelected
+                  itemAssignments[item.id]?.includes(p.id) && styles.participantCheckboxSelected,
+                  item.isShared && styles.participantCheckboxDisabled
                 ]}
-                onPress={() => handleItemAssignmentChange(
-                  item.id, 
-                  p.id, 
-                  !itemAssignments[item.id]?.includes(p.id)
-                )}
+                onPress={() => {
+                  if (!item.isShared) {
+                    handleItemAssignmentChange(
+                      item.id, 
+                      p.id, 
+                      !itemAssignments[item.id]?.includes(p.id)
+                    )
+                  }
+                }}
+                disabled={item.isShared}
               >
                 <Ionicons 
                   name={itemAssignments[item.id]?.includes(p.id) ? "checkmark-circle" : "ellipse-outline"} 
@@ -336,7 +388,13 @@ export default function SplitShareApp() {
     </ScrollView>
   );
 
-  const renderSummaryStep = () => (
+  const renderSummaryStep = () => {
+    // Calculate total for shared items (taxes, etc.)
+    const totalSharedAmount = extractedItems
+      .filter(item => item.isShared)
+      .reduce((sum, item) => sum + item.price, 0);
+    
+    return (
     <ScrollView style={styles.stepContainer}>
       <View style={styles.totalCard}>
         <View style={styles.totalHeader}>
@@ -344,6 +402,14 @@ export default function SplitShareApp() {
           <Text style={styles.totalTitle}>Bill Total</Text>
         </View>
         <Text style={styles.totalAmount}>₹{totalBillAmount.toFixed(2)}</Text>
+        
+        {totalSharedAmount > 0 && (
+          <View style={styles.taxBreakdown}>
+            <Text style={styles.taxInfo}>
+              Includes ₹{totalSharedAmount.toFixed(2)} in taxes and service charges (shared equally)
+            </Text>
+          </View>
+        )}
       </View>
 
       <View style={styles.summarySection}>
@@ -359,7 +425,7 @@ export default function SplitShareApp() {
         ))}
       </View>
     </ScrollView>
-  );
+  );};
 
   const getStepTitle = () => {
     switch (appStep) {
@@ -608,6 +674,11 @@ const styles = StyleSheet.create({
     padding: 16,
     marginBottom: 12,
   },
+  sharedItemCard: {
+    backgroundColor: '#f0f7ff', // Light blue background for shared items
+    borderWidth: 1,
+    borderColor: '#cce4ff',
+  },
   itemHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -649,10 +720,19 @@ const styles = StyleSheet.create({
     borderColor: '#007AFF',
     backgroundColor: '#f0f8ff',
   },
+  participantCheckboxDisabled: {
+    opacity: 0.7,
+    borderStyle: 'dotted',
+  },
   participantCheckboxText: {
     marginLeft: 8,
     fontSize: 12,
     flex: 1,
+  },
+  sharedLabel: {
+    fontSize: 12,
+    fontStyle: 'italic',
+    color: '#0066cc',
   },
   totalCard: {
     backgroundColor: '#f0f9ff',
@@ -677,6 +757,17 @@ const styles = StyleSheet.create({
     fontSize: 32,
     fontWeight: 'bold',
     color: '#34C759',
+  },
+  taxBreakdown: {
+    marginTop: 8,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(52, 199, 89, 0.3)',
+  },
+  taxInfo: {
+    fontSize: 12,
+    color: '#666',
+    fontStyle: 'italic',
   },
   summarySection: {
     marginBottom: 24,
