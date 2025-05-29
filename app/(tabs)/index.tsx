@@ -36,20 +36,18 @@ interface CostPerParticipant {
   [participantId: string]: number;
 }
 
-// Mock function for bill extraction (replace with actual implementation)
+// Import the bill processing function
+import { processBillImage } from '../../utils/imageProcessing';
+
+// Function to extract bill items using Google's Generative AI
 const extractBillItems = async (billImage: string): Promise<{ items: BillItem[] }> => {
-  // Simulate API call
-  await new Promise(resolve => setTimeout(resolve, 2000));
-  
-  // Mock extracted items
-  return {
-    items: [
-      { id: '1', description: 'Margherita Pizza', price: 450 },
-      { id: '2', description: 'Chicken Biryani', price: 320 },
-      { id: '3', description: 'Garlic Bread', price: 180 },
-      { id: '4', description: 'Cold Drinks (2)', price: 120 }
-    ]
-  };
+  try {
+    // Process the bill image using Google's Generative AI
+    return await processBillImage(billImage);
+  } catch (error) {
+    console.error('Error in extractBillItems:', error);
+    throw error;
+  }
 };
 
 export default function SplitShareApp() {
@@ -166,7 +164,26 @@ export default function SplitShareApp() {
     } catch (error) {
       console.error('Error extracting bill items:', error);
       const message = error instanceof Error ? error.message : 'An unknown error occurred during bill processing.';
-      Alert.alert('Error', `Failed to process bill: ${message}`);
+      
+      // Check for API key configuration error
+      if (message.includes('API key not configured')) {
+        Alert.alert(
+          'Configuration Error', 
+          'Please set up your Gemini API key in the config file.',
+          [
+            { 
+              text: 'Learn More', 
+              onPress: () => {
+                // You could add navigation to a help page here
+                Alert.alert('API Key Setup', 'Get your API key from Google AI Studio (https://ai.google.dev/) and add it to config/index.ts')
+              } 
+            },
+            { text: 'OK', style: 'cancel' }
+          ]
+        );
+      } else {
+        Alert.alert('Error', `Failed to process bill: ${message}`);
+      }
     } finally {
       setIsLoading(false);
     }
@@ -393,7 +410,10 @@ export default function SplitShareApp() {
               disabled={isLoading || !billImageUri || participants.length === 0}
             >
               {isLoading ? (
-                <Text style={styles.primaryButtonText}>Processing...</Text>
+                <>
+                  <Text style={styles.primaryButtonText}>Processing...</Text>
+                  <Text style={styles.processingSubtext}>Analyzing bill with AI</Text>
+                </>
               ) : (
                 <>
                   <Text style={styles.primaryButtonText}>Process Bill & Assign Items</Text>
@@ -713,6 +733,11 @@ const styles = StyleSheet.create({
     color: 'white',
     fontSize: 16,
     fontWeight: '600',
+  },
+  processingSubtext: {
+    color: 'rgba(255, 255, 255, 0.8)',
+    fontSize: 12,
+    fontWeight: '400',
   },
   secondaryButton: {
     flexDirection: 'row',
