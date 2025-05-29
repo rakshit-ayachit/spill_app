@@ -9,7 +9,7 @@ interface BillItem {
   id: string;
   description: string;
   price: number;
-  isShared?: boolean; // Flag for tax items that will be shared equally
+  isShared?: boolean; // Flag for tax or rounding-off items
 }
 
 /**
@@ -31,7 +31,6 @@ const getBase64FromUri = async (uri: string): Promise<string> => {
  * Extracts the MIME type from a URI
  */
 const getMimeTypeFromUri = (uri: string): string => {
-  // Default to image/jpeg if can't determine
   if (!uri.includes('.')) return 'image/jpeg';
   
   const extension = uri.split('.').pop()?.toLowerCase();
@@ -49,23 +48,19 @@ const getMimeTypeFromUri = (uri: string): string => {
 
 /**
  * Processes a bill image using Google's Generative AI (Gemini)
- * and extracts items with their prices, including CGST and SGST,
- * splitting tax equally across items.
+ * and extracts items with their prices, including tax and rounding
  */
 export const processBillImage = async (
   imageUri: string
 ): Promise<{ items: BillItem[] }> => {
   try {
-    // Check if API key is configured
     if (!CONFIG.GEMINI_API_KEY || CONFIG.GEMINI_API_KEY === 'YOUR_GEMINI_API_KEY') {
       throw new Error('Gemini API key not configured. Please add your API key in the config file.');
     }
 
-    // Get the base64 data and MIME type
     const base64Data = await getBase64FromUri(imageUri);
     const mimeType = getMimeTypeFromUri(imageUri);
 
-    // Configure the Gemini model
     const model = genAI.getGenerativeModel({
       model: "gemini-2.0-flash",
       safetySettings: [
@@ -88,7 +83,6 @@ export const processBillImage = async (
       ],
     });
 
-    // Prepare the image data
     const imagePart = {
       inlineData: {
         data: base64Data,
@@ -96,19 +90,18 @@ export const processBillImage = async (
       },
     };
 
-    // Construct the prompt for the model
     const prompt = `
       This is an image of a bill or receipt from a restaurant, store, or service provider.
-      
+
       Please carefully analyze the image and extract:
       1. All individual line items with their prices
       2. Any tax-related items (sales tax, GST, HST, VAT, service charge, etc.)
-      
+
       Pay special attention to:
       - Item names/descriptions
       - Their corresponding prices
       - All tax-related charges
-      
+
       Format your response as a valid JSON array of objects with the following structure:
       [
         {
@@ -122,54 +115,54 @@ export const processBillImage = async (
           "isTax": true
         }
       ]
-      
+
       For regular items, set "isTax" to false.
       For any tax or service charge items, set "isTax" to true.
-      
-      Only include the JSON object in your response, nothing else. Make sure the JSON is valid and properly formatted.
-      If you can't see any items or taxes clearly, return empty array for items and zero for cgst and sgst, e.g.:
-      {
-        "items": [],
-        "cgst": 0,
-        "sgst": 0
-      }
+
+      Only include the JSON array in your response, nothing else. Make sure the JSON is valid and properly formatted.
+      If you can't see any items clearly, return an empty array [].
     `;
 
-    // Generate content from model
     const result = await model.generateContent([prompt, imagePart]);
     const response = await result.response;
     const text = response.text();
-    
-    // Parse the JSON response
+
     let parsedItems: { description: string; price: number; isTax?: boolean }[];
     try {
-      parsedResponse = JSON.parse(text);
+      parsedItems = JSON.parse(text);
     } catch (e) {
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      const jsonMatch = text.match(/\[[\s\S]*\]/);
       if (jsonMatch) {
-        parsedResponse = JSON.parse(jsonMatch[0]);
+        parsedItems = JSON.parse(jsonMatch[0]);
       } else {
         throw new Error('Failed to parse model response as JSON');
       }
     }
 
-    // Defensive defaults if missing
-    const items = parsedResponse.items || [];
-    const cgst = parsedResponse.cgst || 0;
-    const sgst = parsedResponse.sgst || 0;
-
-    // Split total tax equally across items
-    const totalTaxPerItem = items.length > 0 ? (cgst + sgst) / items.length : 0;
-
-    // Map to BillItem with unique IDs and adjusted prices
-    const billItems: BillItem[] = items.map((item, index) => ({
+    // Map the parsed items to BillItem format with unique IDs
+    const billItems: BillItem[] = parsedItems.map((item, index) => ({
       id: (index + 1).toString(),
       description: item.description,
       price: item.price,
-      isShared: item.isTax === true // Mark tax items as shared
+      isShared: item.isTax === true,
     }));
 
+    // Calculate total and round-off
+    const rawTotal = billItems.reduce((sum, item) => sum + item.price, 0);
+    const roundedTotal = Math.ceil(rawTotal);
+    const roundOffDiff = parseFloat((roundedTotal - rawTotal).toFixed(2));
+
+    if (roundOffDiff > 0) {
+      billItems.push({
+        id: (billItems.length + 1).toString(),
+        description: "Round Off",
+        price: roundOffDiff,
+        isShared: true,
+      });
+    }
+
     return { items: billItems };
+
   } catch (error) {
     console.error('Error processing bill image:', error);
     throw new Error('Failed to process bill image: ' + (error instanceof Error ? error.message : 'Unknown error'));
